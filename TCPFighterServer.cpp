@@ -6,36 +6,37 @@
 #include <list>
 #include <map>
 #include "RingBuffer.h"
+#include "CPacket.h"
 #include "PacketDefine.h"
 
-#define		SERVERPORT	5000 //20000
+#define		SERVERPORT	20000
 #define		FPS			25
-#define		WIDTH		640	//6400
-#define		HEIGHT		480	//6400
+#define		WIDTH		6400
+#define		HEIGHT		6400
 #define		BUFSIZE		10000
 
 //-----------------------------------------------------------------
-// 30ÃÊ ÀÌ»óÀÌ µÇµµ·Ï ¾Æ¹«·± ¸Ş½ÃÁö ¼ö½Åµµ ¾ø´Â°æ¿ì Á¢¼Ó ²÷À½.
+// 30ì´ˆ ì´ìƒì´ ë˜ë„ë¡ ì•„ë¬´ëŸ° ë©”ì‹œì§€ ìˆ˜ì‹ ë„ ì—†ëŠ”ê²½ìš° ì ‘ì† ëŠìŒ.
 //-----------------------------------------------------------------
 #define dfNETWORK_PACKET_RECV_TIMEOUT	30000
 
-//È­¸é ÀÌµ¿ ¿µ¿ª
-#define dfRANGE_MOVE_TOP	50//0
-#define dfRANGE_MOVE_LEFT	10//0
-#define dfRANGE_MOVE_RIGHT	630//6400
-#define dfRANGE_MOVE_BOTTOM	470//6400
+//í™”ë©´ ì´ë™ ì˜ì—­
+#define dfRANGE_MOVE_TOP	0
+#define dfRANGE_MOVE_LEFT	0
+#define dfRANGE_MOVE_RIGHT	6400
+#define dfRANGE_MOVE_BOTTOM	6400
 
-//ÀÌµ¿ ¼Óµµ
+//ì´ë™ ì†ë„
 #define		MOVE_SPEED_X	6
 #define		MOVE_SPEED_Y	4
 
-//ÀÌµ¿ ¿À·ù Ã¼Å© ¹üÀ§
+//ì´ë™ ì˜¤ë¥˜ ì²´í¬ ë²”ìœ„
 #define		dfERROR_RANGE	50
 
 #define		MAX_HP		100
 
 //---------------------------------------------------------------
-// °ø°İ¹üÀ§.
+// ê³µê²©ë²”ìœ„.
 //---------------------------------------------------------------
 #define dfATTACK1_RANGE_X		80
 #define dfATTACK2_RANGE_X		90
@@ -45,13 +46,17 @@
 #define dfATTACK3_RANGE_Y		20
 
 //---------------------------------------------------------------
-// °ø°İ µ¥¹ÌÁö.
+// ê³µê²© ë°ë¯¸ì§€.
 //---------------------------------------------------------------
 #define dfATTACK1_DAMAGE		1
 #define dfATTACK2_DAMAGE		2
 #define dfATTACK3_DAMAGE		3
 
-int		g_iLogLevel = 0;
+//ì„¹í„° ë²”ìœ„
+#define	dfSECTOR_MAX_X 50
+#define	dfSECTOR_MAX_Y 50
+
+int		g_iLogLevel = 1;
 WCHAR	g_szLogBuff[1024];
 
 #define dfLOG_LEVEL_DEBUG		0
@@ -71,12 +76,22 @@ do {												\
 	}												\
 } while (0);										\
 
+struct st_SECTOR_POS
+{
+	int		iX;
+	int		iY;
+};
+struct st_SECTOR_AROUND
+{
+	int				iCount;
+	st_SECTOR_POS	Around[9];
+};
 struct Session
 {
 	SOCKET			sock;
-	CRingBuffer*	recvQueue;
-	CRingBuffer*	sendQueue;
-	DWORD			dwSessionID;//=userID¿Í °°°Ô.
+	CRingBuffer* recvQueue;
+	CRingBuffer* sendQueue;
+	DWORD			dwSessionID;//=userIDì™€ ê°™ê²Œ.
 	DWORD			dwLastRecvTime;
 };
 struct USER
@@ -85,15 +100,25 @@ struct USER
 	DWORD	userID;
 	BOOL	isMove;
 	BYTE	Direction;
+
 	short	x;
 	short	y;
+
+	st_SECTOR_POS	curSector;
+	st_SECTOR_POS	oldSector;
+
 	char	hp;
 };
-//¼¼¼Ç ¸®½ºÆ®
+//ì„¸ì…˜ ê´€ë¦¬
 std::map<int, Session*> sessionMap;
 std::list<Session*> disconnectSessions;
-//Ä³¸¯ÅÍ °ü¸®
+//ìºë¦­í„° ê´€ë¦¬
 std::map<int, USER*> userMap;
+//ì›”ë“œë§µ ìºë¦­í„° ì„¹í„°
+std::list<USER*> g_Sector[dfSECTOR_MAX_Y][dfSECTOR_MAX_X];
+//ì„¹í„° ì¹¸ í¬ê¸°
+const int sectorXSize = WIDTH / dfSECTOR_MAX_X;
+const int sectorYSize = HEIGHT / dfSECTOR_MAX_Y;
 
 int allocatingID = 0;
 int retVal;
@@ -105,9 +130,9 @@ int enqueueRetVal;
 int dequeueRetVal;
 
 int FPSCount = 0;
-int recvCount = 0; 
+int recvCount = 0;
 int sendCount = 0;
-inline BOOL IsValidPosition(WORD prevX, WORD prevY, WORD nextX, WORD nextY)
+BOOL IsValidPosition(WORD prevX, WORD prevY, WORD nextX, WORD nextY)
 {
 	if (abs(prevX - nextX) > dfERROR_RANGE || abs(prevY - nextY) > dfERROR_RANGE)
 	{
@@ -116,7 +141,7 @@ inline BOOL IsValidPosition(WORD prevX, WORD prevY, WORD nextX, WORD nextY)
 	else return TRUE;
 }
 
-//³×Æ®¿öÅ©
+//ë„¤íŠ¸ì›Œí¬
 void Disconnect(Session* session)
 {
 	disconnectSessions.push_back(session);
@@ -141,22 +166,24 @@ void DeleteSession(int sessionID)
 	sessionMap.erase(sessionID);
 }
 void SendUnicast(Session* session, CPacket* clpPacket);
-void SendBroadcast(Session* exceptSession, CPacket* clpPacket);
+//void SendBroadcast(Session* exceptSession, CPacket* clpPacket);
+void SendPacket_SectorOne(int sectorX, int sectorY, CPacket* clpPacket, Session* pExceptSession);
+void SendPacket_Around(Session* pSession, CPacket* clpPacket, bool isSendMe = false);
 void NetworkProc(SOCKET listen_sock);
 void NetSelectProc(SOCKET* sockets, fd_set* rset, fd_set* wset);
 void AcceptProc(SOCKET listen_sock);
 void RecvProc(SOCKET socket);
 void SendProc(SOCKET socket);
 
-//ÄÁÅÙÃ÷
+//ì»¨í…ì¸ 
 USER* FindUser(int userID)
 {
-	//À¯Àú ¾Ë¾Æ³»±â
+	//ìœ ì € ì•Œì•„ë‚´ê¸°
 	auto iter = userMap.find(userID);
 	if (iter == userMap.end())
 	{
 		_LOG(dfLOG_LEVEL_ERROR, L"!!FindUser Failed. USERID: %d", userID);
-		return NULL;
+		exit(1);
 	}
 	return iter->second;
 }
@@ -171,28 +198,48 @@ void DeleteUser(int userID)
 void MoveUser(USER* user);
 BOOL IsHit(BYTE atkType, BOOL isLeft, WORD attackerX, WORD attackerY, WORD targetX, WORD targetY);
 void CollisionProc(BYTE atkType, USER* atkUser);
+//ì„¹í„° ì²˜ë¦¬
+void Sector_AddUser(USER* pUser);
+void Sector_RemoveUser(USER* pUser);
+bool Sector_UpdateUser(USER* pUser);
+void GetSectorAround(int sectorX, int sectorY, st_SECTOR_AROUND* pSectorAround);
+void GetUpdateSectorAround(USER* pUser, st_SECTOR_AROUND* pRemoveSector, st_SECTOR_AROUND* pAddSector);
+void UserSectorUpdatePacket(USER* pUser);
 
-//¼ö½Å ÆĞÅ¶ Á¾·ùº° Ã³¸®
-void RecvPacketProc_MoveStart(Session* session, CPacket * clpPacket);
+//ìˆ˜ì‹  íŒ¨í‚· ì¢…ë¥˜ë³„ ì²˜ë¦¬
+void RecvPacketProc_MoveStart(Session* session, CPacket* clpPacket);
 void RecvPacketProc_MoveStop(Session* session, CPacket* clpPacket);
 void RecvPacketProc_Attack1(Session* session, CPacket* clpPacket);
 void RecvPacketProc_Attack2(Session* session, CPacket* clpPacket);
 void RecvPacketProc_Attack3(Session* session, CPacket* clpPacket);
+void RecvPacketProc_Echo(Session* session, CPacket* clpPacket);
+//ì†¡ì‹  íŒ¨í‚· êµ¬ì„±
+void SetPacket_CreateMyCharacter(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y, BYTE hp);
+void SetPacket_CreateOtherCharacter(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y, BYTE hp);
+void SetPacket_DeleteCharacter(CPacket* clpPacket, DWORD ID);
+void SetPacket_SC_MoveStart(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y);
+void SetPacket_SC_MoveStop(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y);
+void SetPacket_SC_ATTACK1(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y);
+void SetPacket_SC_ATTACK2(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y);
+void SetPacket_SC_ATTACK3(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y);
+void SetPacket_SC_DAMAGE(CPacket* clpPacket, DWORD AttackID, DWORD DamageID, BYTE DamageHP);
+void SetPacket_SC_Echo(CPacket* clpPacket, DWORD time);
+void SetPacket_SC_Sync(CPacket* clpPacket, DWORD ID, WORD x, WORD y);
 
 int wmain(int argc, WCHAR* argv[])
 {
 	timeBeginPeriod(1);
-	//1ÃÊ¸¶´Ù Å¸ÀÌ¸Ó
+	//1ì´ˆë§ˆë‹¤ íƒ€ì´ë¨¸
 	DWORD statusTimer = timeGetTime();
-	//ÇÁ·¹ÀÓ ½Ã°£ ¸ÂÃçÁÖ´Â(20ms) ¿ëµµÀÇ º¯¼ö
+	//í”„ë ˆì„ ì‹œê°„ ë§ì¶°ì£¼ëŠ”(20ms) ìš©ë„ì˜ ë³€ìˆ˜
 	DWORD startTime = timeGetTime();
 	DWORD currentTime;
-	
-	//À©¼Ó ÃÊ±âÈ­
+
+	//ìœˆì† ì´ˆê¸°í™”
 	WSADATA wsa;
 	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
 		return 1;
-	else _LOG(dfLOG_LEVEL_SYSTEM,L"WSAStartup #");
+	else _LOG(dfLOG_LEVEL_SYSTEM, L"WSAStartup #");
 	//listen socket
 	SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, 0);
 	//bind
@@ -209,12 +256,12 @@ int wmain(int argc, WCHAR* argv[])
 	if (retVal == SOCKET_ERROR) return 1;
 	else _LOG(dfLOG_LEVEL_SYSTEM, L"LISTEN OK #");
 
-	//³íºí¶ô ¼ÒÄÏÀ¸·Î ¸¸µé±â
+	//ë…¼ë¸”ë½ ì†Œì¼“ìœ¼ë¡œ ë§Œë“¤ê¸°
 	u_long isOn = 1;
 	retVal = ioctlsocket(listen_sock, FIONBIO, &isOn);
-	if(retVal == SOCKET_ERROR) return 1;
+	if (retVal == SOCKET_ERROR) return 1;
 
-	//LINGER ¿É¼ÇÀ¸·Î closesocket ½Ã RST º¸³»°Ô
+	//LINGER ì˜µì…˜ìœ¼ë¡œ closesocket ì‹œ RST ë³´ë‚´ê²Œ
 	struct linger optVal;
 	optVal.l_onoff = 1;
 	optVal.l_linger = 0;
@@ -223,22 +270,22 @@ int wmain(int argc, WCHAR* argv[])
 	//LOOP
 	while (1)
 	{
-		//³×Æ®¿öÅ© IO
+		//ë„¤íŠ¸ì›Œí¬ IO
 		NetworkProc(listen_sock);
-		
-		//·ÎÁ÷ - 50ÇÁ·¹ÀÓ ¸ÂÃß±â
+
+		//ë¡œì§ - 50í”„ë ˆì„ ë§ì¶”ê¸°
 		currentTime = timeGetTime();
 		if (currentTime - startTime >= 1000 / FPS)
 		{
 			startTime = currentTime;
-			//·ÎÁ÷ (ÀÌµ¿)
+			//ë¡œì§ (ì´ë™)
 			for (std::map<int, USER*>::iterator iter = userMap.begin(); iter != userMap.end(); iter++)
 			{
 				MoveUser(iter->second);
 			}
 			FPSCount++;
 		}
-		//1ÃÊ¸¶´Ù ÇöÀç »óÅÂ PRINT
+		//1ì´ˆë§ˆë‹¤ í˜„ì¬ ìƒíƒœ PRINT, ì¼ì •ì‹œê°„ ì´ìƒ ì‘ë‹µì—†ëŠ” í´ë¼ì´ì–¸íŠ¸ ëŠê¸°
 		if (currentTime - statusTimer >= 1000)
 		{
 			statusTimer = currentTime;
@@ -246,15 +293,25 @@ int wmain(int argc, WCHAR* argv[])
 			FPSCount = 0;
 			recvCount = 0;
 			sendCount = 0;
+			Session* curSession;
+			//ì¼ì •ì‹œê°„ ì´ìƒ ì‘ë‹µì—†ëŠ” í´ë¼ì´ì–¸íŠ¸ ëŠê¸°
+			for (std::map<int, Session*>::iterator iter = sessionMap.begin(); iter != sessionMap.end(); iter++)
+			{
+				curSession = iter->second;
+				if (currentTime - curSession->dwLastRecvTime > dfNETWORK_PACKET_RECV_TIMEOUT)
+				{
+					Disconnect(curSession);
+				}
+			}
 		}
 	}
-	//Á¾·á
+	//ì¢…ë£Œ
 	closesocket(listen_sock);
 	WSACleanup();
 	return 0;
 }
 
-//³×Æ®¿öÅ©
+//ë„¤íŠ¸ì›Œí¬
 void NetworkProc(SOCKET listen_sock)
 {
 	Session* pSession;
@@ -265,13 +322,13 @@ void NetworkProc(SOCKET listen_sock)
 	fd_set rset, wset;
 	FD_ZERO(&rset);
 	FD_ZERO(&wset);
-	//¸®½¼ ¼ÒÄÏ ³Ö±â
+	//ë¦¬ìŠ¨ ì†Œì¼“ ë„£ê¸°
 	FD_SET(listen_sock, &rset);
 	socketTable[socketCount] = listen_sock;
 	socketCount++;
-	//¸®½¼ ¼ÒÄÏ ¹× Á¢¼Ó ÁßÀÎ ¸ğµç Å¬¶óÀÌ¾ğÆ®¿¡ ´ëÇØ SOCKET Ã¼Å©
-	
-	//rset, wset¿¡ ¼ÒÄÏµé ³Ö±â
+	//ë¦¬ìŠ¨ ì†Œì¼“ ë° ì ‘ì† ì¤‘ì¸ ëª¨ë“  í´ë¼ì´ì–¸íŠ¸ì— ëŒ€í•´ SOCKET ì²´í¬
+
+	//rset, wsetì— ì†Œì¼“ë“¤ ë„£ê¸°
 	for (auto iter = sessionMap.begin(); iter != sessionMap.end(); iter++)
 	{
 		pSession = iter->second;
@@ -282,7 +339,7 @@ void NetworkProc(SOCKET listen_sock)
 			FD_SET(pSession->sock, &wset);
 		}
 		socketCount++;
-		//select ÃÖ´ëÄ¡ µµ´Ş ½Ã
+		//select ìµœëŒ€ì¹˜ ë„ë‹¬ ì‹œ
 		if (FD_SETSIZE <= socketCount)
 		{
 			NetSelectProc(socketTable, &rset, &wset);
@@ -304,15 +361,19 @@ void NetworkProc(SOCKET listen_sock)
 	{
 		CPacket cPacket;
 		SetPacket_DeleteCharacter(&cPacket, (*iter)->dwSessionID);
-		//Á×Àº »ç¿ëÀÚ¿¡°Ôµµ º¸³¿
-		SendBroadcast(NULL, &cPacket);
+		//ì£½ì€ ì‚¬ìš©ìì—ê²Œë„ ë³´ëƒ„
+		//SendBroadcast(NULL, &cPacket);
+		SendPacket_Around(*iter, &cPacket, true);
 		_LOG(dfLOG_LEVEL_DEBUG, L"Disconnect # Session ID: %d", (*iter)->dwSessionID);
-		//¸®½ºÆ®¿¡¼­ Á¦°Å
+		//ë¦¬ìŠ¤íŠ¸ì—ì„œ ì œê±°
 		USER* user = FindUser((*iter)->dwSessionID);
+		//ì„¹í„°ì—ì„œ ì œê±°
+		g_Sector[user->curSector.iY][user->curSector.iX].remove(user);
+		//ìœ ì € ë§µì—ì„œ ì œê±°
 		DeleteUser(user->userID);
 		free(user);
+		//ì„¸ì…˜ ë§µì—ì„œ ì œê±°
 		DeleteSession((*iter)->dwSessionID);
-
 		closesocket((*iter)->sock);
 		delete((*iter)->recvQueue);
 		delete((*iter)->sendQueue);
@@ -330,13 +391,13 @@ void NetSelectProc(SOCKET* sockets, fd_set* pRset, fd_set* pWset)
 	selectCount = select(0, pRset, pWset, NULL, &timeZero);
 	if (selectCount > 0)
 	{
-		//accept½Ã¿¡, 0¹øÂ°´Â Ç×»ó listen socket
+		//acceptì‹œì—, 0ë²ˆì§¸ëŠ” í•­ìƒ listen socket
 		if (FD_ISSET(sockets[0], pRset))
 		{
 			AcceptProc(sockets[0]);
 		}
 		//RECV&SEND
-		for (int i=1; i<FD_SETSIZE; i++)
+		for (int i = 1; i < FD_SETSIZE; i++)
 		{
 			if (sockets[i] == INVALID_SOCKET)
 				break;
@@ -371,7 +432,8 @@ BOOL IsDisconnected(Session* session)
 }
 int sendUnicastRet;
 int sendBroadcastRet;
-void SendUnicast(Session* session, CPacket * clpPacket)
+//íŠ¹ì • 1ëª…ì˜ í´ë¼ì´ì–¸íŠ¸ì—ê²Œ ë©”ì‹œì§€ ë³´ë‚´ê¸°
+void SendUnicast(Session* session, CPacket* clpPacket)
 {
 	sendUnicastRet = session->sendQueue->Enqueue(clpPacket->GetBufferPtr(), clpPacket->GetDataSize());
 	if (sendUnicastRet == -1)
@@ -379,35 +441,89 @@ void SendUnicast(Session* session, CPacket * clpPacket)
 		_LOG(dfLOG_LEVEL_ERROR, L"SENDQUEUE ENQUEUE FAILED : SendUnicast, Session ID: %d", session->dwSessionID);
 		Disconnect(session);
 	}
-	//¾ÈÇØµµ µÈ´Ù(ÀÏÈ¸¿ë)
-	clpPacket->MoveReadPos(sendUnicastRet);
+	//ì•ˆí•´ë„ ëœë‹¤(ì¼íšŒìš©)
+	//clpPacket->Clear();
 }
-void SendBroadcast(Session* exceptSession, CPacket * clpPacket)
+//ë¸Œë¡œë“œìºìŠ¤íŒ… (ì‹œìŠ¤í…œ ë©”ì‹œì§€ ì™¸ì— ì‚¬ìš©x)
+//void SendBroadcast(Session* exceptSession, CPacket* clpPacket)
+//{
+//	Session* pSession;
+//	for (auto iter = sessionMap.begin(); iter != sessionMap.end(); iter++)
+//	{
+//		pSession = iter->second;
+//		if (pSession == exceptSession)
+//			continue;
+//		sendBroadcastRet = pSession->sendQueue->Enqueue(clpPacket->GetBufferPtr(), clpPacket->GetDataSize());
+//		if (sendBroadcastRet == -1)
+//		{
+//			_LOG(dfLOG_LEVEL_ERROR, L"SENDQUEUE ENQUEUE FAILED : SendBroadcast, Session ID: %d, packetSize: %d",
+//				pSession->dwSessionID, clpPacket->GetDataSize());
+//			Disconnect(pSession);
+//		}
+//	}
+//	//ì•ˆí•´ë„ ëœë‹¤(ì¼íšŒìš©)
+//	//clpPacket->Clear();
+//}
+//íŠ¹ì • ì„¹í„° 1ê°œì— ìˆëŠ” í´ë¼ì´ì–¸íŠ¸ë“¤ì—ê²Œ ë©”ì‹œì§€ ë³´ë‚´ê¸°
+int sendSectorOneRet;
+void SendPacket_SectorOne(int sectorX, int sectorY, CPacket* clpPacket, Session* pExceptSession)
 {
-	Session* pSession;
-	for (auto iter = sessionMap.begin(); iter != sessionMap.end(); iter++)
+	Session* curSession;
+	std::list<USER*>* pUserList = &g_Sector[sectorY][sectorX];
+	for (std::list<USER*>::iterator iter = pUserList->begin(); iter != pUserList->end(); iter++)
 	{
-		pSession = iter->second;
-		if (pSession == exceptSession)
-			continue;
-		sendBroadcastRet = pSession->sendQueue->Enqueue(clpPacket->GetBufferPtr(), clpPacket->GetDataSize());
-		if (sendBroadcastRet == -1)
+		curSession = (*iter)->pSession;
+		if (curSession == pExceptSession)
 		{
-			_LOG(dfLOG_LEVEL_ERROR, L"SENDQUEUE ENQUEUE FAILED : SendBroadcast, Session ID: %d, packetSize: %d", 
-				pSession->dwSessionID, clpPacket->GetDataSize());
-			Disconnect(pSession);
+			continue;
+		}
+		sendSectorOneRet = curSession->sendQueue->Enqueue(clpPacket->GetBufferPtr(), clpPacket->GetDataSize());
+		if (sendSectorOneRet == -1)
+		{
+			_LOG(dfLOG_LEVEL_ERROR, L"SENDQUEUE ENQUEUE FAILED : Send_SectorOne, Session ID: %d", curSession->dwSessionID);
+			Disconnect(curSession);
 		}
 	}
-	//¾ÈÇØµµ µÈ´Ù(ÀÏÈ¸¿ë)
-	clpPacket->MoveReadPos(sendBroadcastRet);
+	//ì•ˆí•´ë„ ëœë‹¤(ì¼íšŒìš©)
+	//clpPacket->Clear();
+}
+int sendSectorAroundRet;
+//í´ë¼ì´ì–¸íŠ¸ ê¸°ì¤€ ì£¼ë³€ ì„¹í„°ì— ë©”ì‹œì§€ ë³´ë‚´ê¸° (ìµœëŒ€ 9ê°œ ì˜ì—­)
+void SendPacket_Around(Session* pSession, CPacket* clpPacket, bool isSendMe)
+{
+	USER* user = FindUser(pSession->dwSessionID);
+	st_SECTOR_AROUND sectorAround;
+	GetSectorAround(user->curSector.iX, user->curSector.iY, &sectorAround);
+	Session* curSession;
+	std::list<USER*>* pUserList;
+	for (int i = 0; i < sectorAround.iCount; i++)
+	{
+		pUserList = &g_Sector[sectorAround.Around[i].iY][sectorAround.Around[i].iX];
+		for (std::list<USER*>::iterator iter = pUserList->begin(); iter != pUserList->end(); iter++)
+		{
+			curSession = (*iter)->pSession;
+			if (isSendMe == false && curSession == pSession)
+			{
+				continue;
+			}
+			sendSectorAroundRet = curSession->sendQueue->Enqueue(clpPacket->GetBufferPtr(), clpPacket->GetDataSize());
+			if (sendSectorAroundRet == -1)
+			{
+				_LOG(dfLOG_LEVEL_ERROR, L"SENDQUEUE ENQUEUE FAILED : Send_SectorAround, Session ID: %d", curSession->dwSessionID);
+				Disconnect(curSession);
+			}
+		}
+	}
+	//ì•ˆí•´ë„ ëœë‹¤(ì¼íšŒìš©)
+	//clpPacket->Clear();
 }
 void AcceptProc(SOCKET listen_sock)
 {
 	SOCKADDR_IN clientaddr;
 	WCHAR clientaddrStr[20] = { 0 };
-	//½Å±Ô ¼¼¼Ç
+	//ì‹ ê·œ ì„¸ì…˜
 	Session* session = (Session*)malloc(sizeof(Session));
-	//½Å±Ô À¯Àú
+	//ì‹ ê·œ ìœ ì €
 	USER* user = (USER*)malloc(sizeof(USER));
 	if (session == NULL || user == NULL)
 	{
@@ -425,43 +541,56 @@ void AcceptProc(SOCKET listen_sock)
 	session->recvQueue = new CRingBuffer();
 	session->sendQueue = new CRingBuffer();
 	session->dwSessionID = allocatingID++;
+	session->dwLastRecvTime = timeGetTime();
 	user->userID = session->dwSessionID;
 	user->pSession = session;
-	user->x = 320;
-	user->y = 260;
+	user->x = 200 + ((user->userID % 30) * 200);
+	user->y = 200 + ((user->userID / 30) * 200) % (HEIGHT - 400);
 	user->Direction = dfPACKET_MOVE_DIR_LL;
 	user->isMove = FALSE;
 	user->hp = MAX_HP;
-	//½Å±Ô À¯Àú¿¡°Ô: 1) ½Å±Ô À¯Àú ÇÒ´ç(»ı¼º)
+	user->curSector.iX = user->x / sectorXSize;
+	user->curSector.iY = user->y / sectorYSize;
+	//ê´€ë¦¬ë˜ëŠ” ë§µ/ë¦¬ìŠ¤íŠ¸ì— ì¶”ê°€
+	Sector_AddUser(user);
+	InsertUser(user->userID, user);
+	InsertSession(session->dwSessionID, session);
+	//ì‹ ê·œ ìœ ì €ì—ê²Œ: 1) ì‹ ê·œ ìœ ì € í• ë‹¹(ìƒì„±)
 	CPacket cPacket;
 	SetPacket_CreateMyCharacter(&cPacket, user->userID, user->Direction, user->x, user->y, user->hp);
 	SendUnicast(session, &cPacket);
 	_LOG(dfLOG_LEVEL_DEBUG, L"Create Character # SessionID:%d	X:%d	Y:%d", user->userID, user->x, user->y);
-	//½Å±Ô À¯Àú¿¡°Ô: 2) ´Ù¸¥ Ä³¸¯ÅÍµé »ı¼º
+	//ì‹ ê·œ ìœ ì €ì—ê²Œ: 2) ë‹¤ë¥¸ ìºë¦­í„°ë“¤ ìƒì„± (ë³¸ì¸ ì„¹í„°ì˜ ìºë¦­í„°ë§Œ)
+	st_SECTOR_AROUND sectorAround;
+	GetSectorAround(user->curSector.iX, user->curSector.iY, &sectorAround);
 	USER* curUser;
-	for (std::map<int, USER*>::iterator iter = userMap.begin(); iter != userMap.end(); iter++)
+	std::list<USER*>* pSectorUserList;
+	for (int i = 0; i < sectorAround.iCount; i++)
 	{
-		cPacket.Clear();
-		curUser = iter->second;
-		SetPacket_CreateOtherCharacter(&cPacket, curUser->userID, curUser->Direction, curUser->x, curUser->y, curUser->hp);
-		SendUnicast(session, &cPacket);
-		//ÀÌ¹Ì ÀÌµ¿ ÁßÀÎ À¯ÀúÀÎ °æ¿ì´Â ¾Ë·ÁÁà¾ßÇÑ´Ù.
-		if (curUser->isMove == TRUE)
+		pSectorUserList = &g_Sector[sectorAround.Around[i].iY][sectorAround.Around[i].iX];
+		for (std::list<USER*>::iterator iter = pSectorUserList->begin(); iter != pSectorUserList->end(); iter++)
 		{
-			cPacket.Clear();
-			SetPacket_SC_MoveStart(&cPacket, curUser->userID, curUser->Direction, curUser->x, curUser->y);
+			curUser = *iter;
+			//ìê¸° ìì‹ ì€ ì œì™¸í•˜ê³  ë³´ë‚´ì•¼í•œë‹¤.
+			if (curUser == user)
+				continue;
+			SetPacket_CreateOtherCharacter(&cPacket, curUser->userID, curUser->Direction, curUser->x, curUser->y, curUser->hp);
 			SendUnicast(session, &cPacket);
-			_LOG(dfLOG_LEVEL_DEBUG, L"# (To NewUser)PACKET_MOVESTART # SessionID:%d / Direction:%d / X:%d / Y:%d",
-				curUser->userID, curUser->Direction, curUser->x, curUser->y);
+			//ì´ë¯¸ ì´ë™ ì¤‘ì¸ ìœ ì €ì¸ ê²½ìš°ëŠ” ì•Œë ¤ì¤˜ì•¼í•œë‹¤.
+			if (curUser->isMove == TRUE)
+			{
+				SetPacket_SC_MoveStart(&cPacket, curUser->userID, curUser->Direction, curUser->x, curUser->y);
+				SendUnicast(session, &cPacket);
+				_LOG(dfLOG_LEVEL_DEBUG, L"# (To NewUser)PACKET_MOVESTART # SessionID:%d / Direction:%d / X:%d / Y:%d",
+					curUser->userID, curUser->Direction, curUser->x, curUser->y);
+			}
 		}
 	}
-	//´Ù¸¥ À¯Àúµé¿¡°Ô : ½Å±Ô À¯ÀúÀÇ Ä³¸¯ÅÍ »ı¼º
+	//ë‹¤ë¥¸ ìœ ì €ë“¤ì—ê²Œ : ì‹ ê·œ ìœ ì €ì˜ ìºë¦­í„° ìƒì„±
 	cPacket.Clear();
 	SetPacket_CreateOtherCharacter(&cPacket, user->userID, user->Direction, user->x, user->y, user->hp);
-	SendBroadcast(session, &cPacket);
-	//¸Ê, ¸®½ºÆ®¿¡ Ãß°¡
-	InsertUser(user->userID, user);
-	InsertSession(session->dwSessionID, session);
+	//SendBroadcast(session, &cPacket);
+	SendPacket_Around(session, &cPacket, false);
 }
 void RecvProc(SOCKET socket)
 {
@@ -469,11 +598,11 @@ void RecvProc(SOCKET socket)
 	if (session == NULL)
 		return;
 	session->dwLastRecvTime = timeGetTime();
-	//¸µ¹öÆÛ·Î ¹Ş±â
+	//ë§ë²„í¼ë¡œ ë°›ê¸°
 	int directEnqueueSize = 0;
 	do
 	{
-		//³ÖÀ» °ø°£ ºÎÁ·ÇÏ¸é ¼¼¼Ç Á¦°Å
+		//ë„£ì„ ê³µê°„ ë¶€ì¡±í•˜ë©´ ì„¸ì…˜ ì œê±°
 		if (session->recvQueue->GetFreeSize() == 0)
 		{
 			_LOG(dfLOG_LEVEL_ERROR, L"RECVQUEUE ENQUEUE FAILED : RecvProc, Session ID: %d", session->dwSessionID);
@@ -489,15 +618,23 @@ void RecvProc(SOCKET socket)
 				_LOG(dfLOG_LEVEL_ERROR, L"!!RECVERROR!! RECV-WSAEWOULDBLOCK!");
 				return;
 			}
-			//±âÅ¸ ¿À·ù À¯Àú »èÁ¦
+			//ê¸°íƒ€ ì˜¤ë¥˜ ìœ ì € ì‚­ì œ
 			else
 			{
-				_LOG(dfLOG_LEVEL_ERROR, L"!!RECVERROR!! Session : %d, ERRORCODE: %d", session->dwSessionID, WSAGetLastError());
+				int errorCode = WSAGetLastError();
+				if (errorCode == 10054)
+				{
+					_LOG(dfLOG_LEVEL_DEBUG, L"RECV - Session %d CLOSED itself / ERRORCODE: %d", session->dwSessionID, WSAGetLastError());
+				}
+				else
+				{
+					_LOG(dfLOG_LEVEL_ERROR, L"!!RECVERROR!! Session : %d, ERRORCODE: %d", session->dwSessionID, WSAGetLastError());
+				}
 				Disconnect(session);
 				return;
 			}
 		}
-		//Á¾·á½Ã¿¡
+		//ì¢…ë£Œì‹œì—
 		else if (recvRetVal == 0)
 		{
 			_LOG(dfLOG_LEVEL_DEBUG, L"!!RECV FIN/RST!! Session : %d", session->dwSessionID);
@@ -510,21 +647,21 @@ void RecvProc(SOCKET socket)
 	stPACKET_HEADER recvHeader;
 	//char packet_buf[100];
 	CPacket cPacket;
-	//packet ´ç Ã³¸®
+	//packet ë‹¹ ì²˜ë¦¬
 	while (session->recvQueue->GetUseSize() > 0)
 	{
-		//´Ù µµÂøÇÏÁö ¾ÊÀº ÆĞÅ¶ Ã³¸®
-		//Çì´õ
+		//ë‹¤ ë„ì°©í•˜ì§€ ì•Šì€ íŒ¨í‚· ì²˜ë¦¬
+		//í—¤ë”
 		if (session->recvQueue->Peek((char*)&recvHeader, sizeof(recvHeader)) == -1)
 			break;
-		//byCode °ËÁõ -> ½ÇÆĞ½Ã ¼¼¼Ç ²÷±â
+		//byCode ê²€ì¦ -> ì‹¤íŒ¨ì‹œ ì„¸ì…˜ ëŠê¸°
 		if (recvHeader.byCode != dfPACKET_CODE)
 		{
 			_LOG(dfLOG_LEVEL_ERROR, L"!!HEADER BYTECODE ERROR, Session ID: %d", session->dwSessionID);
 			Disconnect(session);
 			return;
 		}
-		//bySize °ËÁõ
+		//bySize ê²€ì¦
 		if ((DWORD)session->recvQueue->GetUseSize() < sizeof(recvHeader) + recvHeader.bySize)
 		{
 			break;
@@ -551,6 +688,9 @@ void RecvProc(SOCKET socket)
 			break;
 		case dfPACKET_CS_ATTACK3:
 			RecvPacketProc_Attack3(session, &cPacket);
+			break;
+		case dfPACKET_CS_ECHO:
+			RecvPacketProc_Echo(session, &cPacket);
 			break;
 		}
 	}
@@ -582,66 +722,72 @@ void SendProc(SOCKET socket)
 	}
 }
 
-//ÄÁÅÙÃ÷
+//ì»¨í…ì¸ 
 void MoveUser(USER* user)
 {
-	//ÀÌµ¿ °¡´ÉÇÑÁö È®ÀÎ
+	//ì´ë™ ê°€ëŠ¥í•œì§€ í™•ì¸
 	if (user->isMove == TRUE)
 	{
 		switch (user->Direction)
 		{
 		case dfPACKET_MOVE_DIR_LL:
-			if (user->x <= dfRANGE_MOVE_LEFT)
+			if (user->x - MOVE_SPEED_X < dfRANGE_MOVE_LEFT)
 				return;
 			user->x -= MOVE_SPEED_X;
 			break;
 		case dfPACKET_MOVE_DIR_LU:
-			if (user->x <= dfRANGE_MOVE_LEFT)
+			if (user->x - MOVE_SPEED_X < dfRANGE_MOVE_LEFT)
 				return;
-			if (user->y <= dfRANGE_MOVE_TOP)
+			if (user->y - MOVE_SPEED_Y < dfRANGE_MOVE_TOP)
 				return;
 			user->x -= MOVE_SPEED_X;
 			user->y -= MOVE_SPEED_Y;
 			break;
 		case dfPACKET_MOVE_DIR_UU:
-			if (user->y <= dfRANGE_MOVE_TOP)
+			if (user->y - MOVE_SPEED_Y < dfRANGE_MOVE_TOP)
 				return;
 			user->y -= MOVE_SPEED_Y;
 			break;
 		case dfPACKET_MOVE_DIR_RU:
-			if (user->x >= dfRANGE_MOVE_RIGHT)
+			if (user->x + MOVE_SPEED_X > dfRANGE_MOVE_RIGHT)
 				return;
-			if (user->y <= dfRANGE_MOVE_TOP)
+			if (user->y - MOVE_SPEED_Y < dfRANGE_MOVE_TOP)
 				return;
 			user->x += MOVE_SPEED_X;
 			user->y -= MOVE_SPEED_Y;
 			break;
 		case dfPACKET_MOVE_DIR_RR:
-			if (user->x >= dfRANGE_MOVE_RIGHT)
+			if (user->x + MOVE_SPEED_X > dfRANGE_MOVE_RIGHT)
 				return;
 			user->x += MOVE_SPEED_X;
 			break;
 		case dfPACKET_MOVE_DIR_RD:
-			if (user->x >= dfRANGE_MOVE_RIGHT)
+			if (user->x + MOVE_SPEED_X > dfRANGE_MOVE_RIGHT)
 				return;
-			if (user->y >= dfRANGE_MOVE_BOTTOM)
+			if (user->y + MOVE_SPEED_Y > dfRANGE_MOVE_BOTTOM)
 				return;
 			user->x += MOVE_SPEED_X;
 			user->y += MOVE_SPEED_Y;
 			break;
 		case dfPACKET_MOVE_DIR_DD:
-			if (user->y >= dfRANGE_MOVE_BOTTOM)
+			if (user->y + MOVE_SPEED_Y > dfRANGE_MOVE_BOTTOM)
 				return;
 			user->y += MOVE_SPEED_Y;
 			break;
 		case dfPACKET_MOVE_DIR_LD:
-			if (user->x <= dfRANGE_MOVE_LEFT)
+			if (user->x - MOVE_SPEED_X < dfRANGE_MOVE_LEFT)
 				return;
-			if (user->y >= dfRANGE_MOVE_BOTTOM)
+			if (user->y + MOVE_SPEED_Y > dfRANGE_MOVE_BOTTOM)
 				return;
 			user->x -= MOVE_SPEED_X;
 			user->y += MOVE_SPEED_Y;
 			break;
+		}
+		if (Sector_UpdateUser(user))
+		{
+			//_LOG(dfLOG_LEVEL_ERROR, L"[UserID: %d] Section (%d, %d) -> Section (%d, %d)",
+			//	user->userID, user->oldSector.iX, user->oldSector.iY, user->curSector.iX, user->curSector.iY);
+			UserSectorUpdatePacket(user);
 		}
 		//_LOG(dfLOG_LEVEL_DEBUG, L"#SESSION %d MOVING / Direction: %d, X: %d, Y:%d", user->userID, user->Direction, user->x, user->y);
 	}
@@ -704,8 +850,8 @@ void CollisionProc(BYTE atkType, USER* atkUser)
 	default:
 		return;
 	}
-	//¿ŞÂÊÀÎÁö
-	//°ø°İÀ» À§ÇØ ÁÂ/¿ì ¼±ÅÃ
+	//ì™¼ìª½ì¸ì§€
+	//ê³µê²©ì„ ìœ„í•´ ì¢Œ/ìš° ì„ íƒ
 	if (atkUser->Direction == dfPACKET_MOVE_DIR_LL || atkUser->Direction == dfPACKET_MOVE_DIR_LU ||
 		atkUser->Direction == dfPACKET_MOVE_DIR_LD)
 	{
@@ -722,32 +868,34 @@ void CollisionProc(BYTE atkType, USER* atkUser)
 		return;
 	}
 	USER* curUser;
-	//´ë¹ÌÁö , HP ±ğÀÎ À¯Àú Ã³¸®
+	//ëŒ€ë¯¸ì§€ , HP ê¹ì¸ ìœ ì € ì²˜ë¦¬
 	for (std::map<int, USER*>::iterator iter = userMap.begin(); iter != userMap.end(); iter++)
 	{
 		curUser = iter->second;
-		//ÀÚ±â ÀÚ½ÅÀº Á¦¿Ü
+		//ìê¸° ìì‹ ì€ ì œì™¸
 		if (curUser == atkUser)
 			continue;
-		//Ãæµ¹Çß´Â°¡?
+		//ì¶©ëŒí–ˆëŠ”ê°€?
 		if (IsHit(atkType, isLeft, atkUser->x, atkUser->y,
 			curUser->x, curUser->y))
 		{
-			//HP°¡ 0ÀÌÇÏ¶ó¸é »èÁ¦
+			//HPê°€ 0ì´í•˜ë¼ë©´ ì‚­ì œ
 			if (curUser->hp <= damage)
 			{
 				_LOG(dfLOG_LEVEL_DEBUG, L"#SESSION ID %d HP <= 0 -> DIE", curUser->userID);
 				Disconnect(curUser->pSession);
 			}
-			//Á×Áö ¾Ê¾Ò´Ù¸é ´ë¹ÌÁö Ã³¸®
+			//ì£½ì§€ ì•Šì•˜ë‹¤ë©´ ëŒ€ë¯¸ì§€ ì²˜ë¦¬
 			else
 			{
 				curUser->hp -= damage;
 			}
-			//À¯Àúµé¿¡°Ô Ãæµ¹ ¾Ë¸®±â
+			//ìœ ì €ë“¤ì—ê²Œ ì¶©ëŒ ì•Œë¦¬ê¸°
 			CPacket cPacket;
 			SetPacket_SC_DAMAGE(&cPacket, atkUser->userID, curUser->userID, curUser->hp);
-			SendBroadcast(NULL, &cPacket);
+			//ëŒ€ë¯¸ì§€ë¥¼ ë°›ì€ ìºë¦­í„° ì…ì¥ì—ì„œ ì£¼ìœ„ë¡œ ì „ì†¡
+			SendPacket_Around(curUser->pSession, &cPacket, true);
+			//SendBroadcast(NULL, &cPacket);
 			//_LOG(dfLOG_LEVEL_DEBUG, L"# DAMAGE # SessionID:%d -> SessionID:%d", atkUser->userID, curUser->userID);
 		}
 	}
@@ -757,114 +905,444 @@ void RecvPacketProc_MoveStart(Session* session, CPacket* clpPacket)
 {
 	USER* user = FindUser(session->dwSessionID);
 
-	WORD prevX = user->x;
-	WORD prevY = user->y;
-	//isMove TRUE, direction, ÁÂÇ¥
+	WORD newX;
+	WORD newY;
+	//isMove TRUE, direction, ì¢Œí‘œ
 	user->isMove = TRUE;
-	*clpPacket >> user->Direction >> user->x >> user->y;
-	//ÁÂÇ¥ À¯È¿¼º Ã¼Å©
-	if (FALSE == IsValidPosition(prevX, prevY, user->x, user->y))
+	*clpPacket >> user->Direction >> newX >> newY;
+	//ì¢Œí‘œ ìœ íš¨ì„± ì²´í¬
+	if (FALSE == IsValidPosition(user->x, user->y, newX, newY))
 	{
-		//SyncPos(clpPacket, user->userID, prevX, prevY);
-		//Àü¼Û
-		Disconnect(session);
-		return;
+		//ì‹±í¬ ë§ì¶”ê¸°
+		SetPacket_SC_Sync(clpPacket, user->userID, user->x, user->y);
+		SendPacket_Around(session, clpPacket, true);
+		//SendBroadcast(NULL, clpPacket);
+		_LOG(dfLOG_LEVEL_ERROR, L"# !!SYNC # SessionID:%d / server (%d,%d) / client (%d,%d)",
+			user->userID, user->x, user->y, newX, newY);
 	}
-	//´Ù¸¥ À¯Àúµé¿¡°Ô ¾Ë¸®±â
+	else
+	{
+		user->x = newX;
+		user->y = newY;
+	}
+	//ë‹¤ë¥¸ ìœ ì €ë“¤ì—ê²Œ ì•Œë¦¬ê¸°
 	CPacket cPacket;
 	SetPacket_SC_MoveStart(&cPacket, user->userID, user->Direction, user->x, user->y);
-	SendBroadcast(session, &cPacket);
-	_LOG(dfLOG_LEVEL_DEBUG, L"# PACKET_MOVESTART # SessionID:%d / Direction:%d / X:%d / Y:%d", 
+	SendPacket_Around(session, &cPacket, false);
+	//SendBroadcast(session, &cPacket);
+	_LOG(dfLOG_LEVEL_DEBUG, L"# PACKET_MOVESTART # SessionID:%d / Direction:%d / X:%d / Y:%d",
 		user->userID, user->Direction, user->x, user->y);
 }
 void RecvPacketProc_MoveStop(Session* session, CPacket* clpPacket)
 {
-	//À¯Àú ¾Ë¾Æ³»±â
+	//ìœ ì € ì•Œì•„ë‚´ê¸°
 	USER* user = FindUser(session->dwSessionID);
-	WORD prevX = user->x;
-	WORD prevY = user->y;
-	//isMove FALSE, direction, ÁÂÇ¥
+	WORD newX;
+	WORD newY;
+	//isMove TRUE, direction, ì¢Œí‘œ
 	user->isMove = FALSE;
-	*clpPacket >> user->Direction >> user->x >> user->y;
-	//ÁÂÇ¥ À¯È¿¼º Ã¼Å©
-	if (FALSE == IsValidPosition(prevX, prevY, user->x, user->y))
+	*clpPacket >> user->Direction >> newX >> newY;
+	//ì¢Œí‘œ ìœ íš¨ì„± ì²´í¬
+	if (FALSE == IsValidPosition(user->x, user->y, newX, newY))
 	{
-		Disconnect(session);
-		return;
+		//ì‹±í¬ ë§ì¶”ê¸°
+		SetPacket_SC_Sync(clpPacket, user->userID, user->x, user->y);
+		SendPacket_Around(session, clpPacket, true);
+		//SendBroadcast(NULL, clpPacket);
+		_LOG(dfLOG_LEVEL_ERROR, L"# !!SYNC # SessionID:%d / server (%d,%d) / client (%d,%d)",
+			user->userID, user->x, user->y, newX, newY);
 	}
-	//´Ù¸¥ À¯Àúµé¿¡°Ô ¾Ë¸®±â
+	else
+	{
+		user->x = newX;
+		user->y = newY;
+	}
+	//ë‹¤ë¥¸ ìœ ì €ë“¤ì—ê²Œ ì•Œë¦¬ê¸°
 	CPacket cPacket;
 	SetPacket_SC_MoveStop(&cPacket, user->userID, user->Direction, user->x, user->y);
-	SendBroadcast(session, &cPacket);
+	SendPacket_Around(session, &cPacket, false);
+	//SendBroadcast(session, &cPacket);
 	_LOG(dfLOG_LEVEL_DEBUG, L"# PACKET_MOVESTOP # SessionID:%d / Direction:%d / X:%d / Y:%d", user->userID,
 		user->Direction, user->x, user->y);
 }
 void RecvPacketProc_Attack1(Session* session, CPacket* clpPacket)
 {
-	//À¯Àú ¾Ë¾Æ³»±â
+	//ìœ ì € ì•Œì•„ë‚´ê¸°
 	USER* user = FindUser(session->dwSessionID);
-	WORD prevX = user->x;
-	WORD prevY = user->y;
-	//ÁÂÇ¥ º¸Á¤
-	*clpPacket >> user->Direction >> user->x >> user->y;
-	//ÁÂÇ¥ À¯È¿¼º Ã¼Å©
-	if (FALSE == IsValidPosition(prevX, prevY, user->x, user->y))
+	WORD newX;
+	WORD newY;
+	//isMove TRUE, direction, ì¢Œí‘œ
+	*clpPacket >> user->Direction >> newX >> newY;
+	//ì¢Œí‘œ ìœ íš¨ì„± ì²´í¬
+	if (FALSE == IsValidPosition(user->x, user->y, newX, newY))
 	{
-		Disconnect(session);
-		return;
+		//ì‹±í¬ ë§ì¶”ê¸°
+		SetPacket_SC_Sync(clpPacket, user->userID, user->x, user->y);
+		SendPacket_Around(session, clpPacket, true);
+		//SendBroadcast(NULL, clpPacket);
+		_LOG(dfLOG_LEVEL_ERROR, L"# !!SYNC # SessionID:%d / server (%d,%d) / client (%d,%d)",
+			user->userID, user->x, user->y, newX, newY);
 	}
-	//°ø°İ »ç½Ç ¾Ë¸®±â
+	else
+	{
+		user->x = newX;
+		user->y = newY;
+	}
+	//ê³µê²© ì‚¬ì‹¤ ì•Œë¦¬ê¸°
 	CPacket cPacket;
 	SetPacket_SC_ATTACK1(&cPacket, user->userID, user->Direction, user->x, user->y);
-	SendBroadcast(session, &cPacket);
-	//Ãæµ¹ Ã³¸®ÇÏ±â(Åë½ÅÆ÷ÇÔ)
+	SendPacket_Around(session, &cPacket, false);
+	//SendBroadcast(session, &cPacket);
+	//ì¶©ëŒ ì²˜ë¦¬í•˜ê¸°(í†µì‹ í¬í•¨)
 	CollisionProc(dfPACKET_SC_ATTACK1, user);
 	_LOG(dfLOG_LEVEL_DEBUG, L"# PACKET_ATTACK1 # SessionID:%d / Direction:%d / X:%d / Y:%d", user->userID,
 		user->Direction, user->x, user->y);
 }
 void RecvPacketProc_Attack2(Session* session, CPacket* clpPacket)
 {
-	//À¯Àú ¾Ë¾Æ³»±â
+	//ìœ ì € ì•Œì•„ë‚´ê¸°
 	USER* user = FindUser(session->dwSessionID);
-	WORD prevX = user->x;
-	WORD prevY = user->y;
-	//ÁÂÇ¥ º¸Á¤
-	*clpPacket >> user->Direction >> user->x >> user->y;
-	//ÁÂÇ¥ À¯È¿¼º Ã¼Å©
-	if (FALSE == IsValidPosition(prevX, prevY, user->x, user->y))
+	WORD newX;
+	WORD newY;
+	//isMove TRUE, direction, ì¢Œí‘œ
+	*clpPacket >> user->Direction >> newX >> newY;
+	//ì¢Œí‘œ ìœ íš¨ì„± ì²´í¬
+	if (FALSE == IsValidPosition(user->x, user->y, newX, newY))
 	{
-		Disconnect(session);
-		return;
+		//ì‹±í¬ ë§ì¶”ê¸°
+		SetPacket_SC_Sync(clpPacket, user->userID, user->x, user->y);
+		SendPacket_Around(session, clpPacket, true);
+		//SendBroadcast(NULL, clpPacket);
+		_LOG(dfLOG_LEVEL_ERROR, L"# !!SYNC # SessionID:%d / server (%d,%d) / client (%d,%d)",
+			user->userID, user->x, user->y, newX, newY);
 	}
-	//°ø°İ »ç½Ç ¾Ë¸®±â
+	else
+	{
+		user->x = newX;
+		user->y = newY;
+	}
+	//ê³µê²© ì‚¬ì‹¤ ì•Œë¦¬ê¸°
 	CPacket cPacket;
 	SetPacket_SC_ATTACK2(&cPacket, user->userID, user->Direction, user->x, user->y);
-	SendBroadcast(session, &cPacket);
-	//Ãæµ¹ Ã³¸®ÇÏ±â(Åë½ÅÆ÷ÇÔ)
+	SendPacket_Around(session, &cPacket, false);
+	//SendBroadcast(session, &cPacket);
+	//ì¶©ëŒ ì²˜ë¦¬í•˜ê¸°(í†µì‹ í¬í•¨)
 	CollisionProc(dfPACKET_SC_ATTACK2, user);
 	_LOG(dfLOG_LEVEL_DEBUG, L"# PACKET_ATTACK2 # SessionID:%d / Direction:%d / X:%d / Y:%d", user->userID,
 		user->Direction, user->x, user->y);
 }
 void RecvPacketProc_Attack3(Session* session, CPacket* clpPacket)
 {
-	//À¯Àú ¾Ë¾Æ³»±â
+	//ìœ ì € ì•Œì•„ë‚´ê¸°
 	USER* user = FindUser(session->dwSessionID);
-	WORD prevX = user->x;
-	WORD prevY = user->y;
-	//ÁÂÇ¥ º¸Á¤
-	*clpPacket >> user->Direction >> user->x >> user->y;
-	//ÁÂÇ¥ À¯È¿¼º Ã¼Å©
-	if (FALSE == IsValidPosition(prevX, prevY, user->x, user->y))
+	WORD newX;
+	WORD newY;
+	//isMove TRUE, direction, ì¢Œí‘œ
+	*clpPacket >> user->Direction >> newX >> newY;
+	//ì¢Œí‘œ ìœ íš¨ì„± ì²´í¬
+	if (FALSE == IsValidPosition(user->x, user->y, newX, newY))
 	{
-		Disconnect(session);
-		return;
+		//ì‹±í¬ ë§ì¶”ê¸°
+		SetPacket_SC_Sync(clpPacket, user->userID, user->x, user->y);
+		SendPacket_Around(session, clpPacket, true);
+		//SendBroadcast(NULL, clpPacket);
+		_LOG(dfLOG_LEVEL_ERROR, L"# !!SYNC # SessionID:%d / server (%d,%d) / client (%d,%d)",
+			user->userID, user->x, user->y, newX, newY);
 	}
-	//°ø°İ »ç½Ç ¾Ë¸®±â
+	else
+	{
+		user->x = newX;
+		user->y = newY;
+	}
+	//ê³µê²© ì‚¬ì‹¤ ì•Œë¦¬ê¸°
 	CPacket cPacket;
 	SetPacket_SC_ATTACK3(&cPacket, user->userID, user->Direction, user->x, user->y);
-	SendBroadcast(session, &cPacket);
-	//Ãæµ¹ Ã³¸®ÇÏ±â(Åë½ÅÆ÷ÇÔ)
+	SendPacket_Around(session, &cPacket, false);
+	//SendBroadcast(session, &cPacket);
+	//ì¶©ëŒ ì²˜ë¦¬í•˜ê¸°(í†µì‹ í¬í•¨)
 	CollisionProc(dfPACKET_SC_ATTACK3, user);
 	_LOG(dfLOG_LEVEL_DEBUG, L"# PACKET_ATTACK3 # SessionID:%d / Direction:%d / X:%d / Y:%d", user->userID,
 		user->Direction, user->x, user->y);
+}
+void RecvPacketProc_Echo(Session* session, CPacket* clpPacket)
+{
+	//íŒ¨í‚· ìˆ˜ì‹ 
+	DWORD echoTime;
+	*clpPacket >> echoTime;
+	//í•´ë‹¹ ì„¸ì…˜ì˜ recvTime ê°±ì‹ 
+	session->dwLastRecvTime = timeGetTime();
+	//í•´ë‹¹ ì„¸ì…˜ì—ê²Œ ì—ì½” ëŒë ¤ì£¼ê¸°
+	CPacket cPacket;
+	SetPacket_SC_Echo(&cPacket, echoTime);
+	SendUnicast(session, &cPacket);
+	_LOG(dfLOG_LEVEL_DEBUG, L"# PACKET_ECHO # SessionID:%d / time: %d", session->dwSessionID, echoTime);
+}
+
+void SetPacket_CreateMyCharacter(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y, BYTE hp)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_CREATE_MY_CHARACTER;
+	header.byType = dfPACKET_SC_CREATE_MY_CHARACTER;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << ID << Direction << x << y << hp;
+}
+void SetPacket_CreateOtherCharacter(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y, BYTE hp)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_CREATE_OTHER_CHARACTER;
+	header.byType = dfPACKET_SC_CREATE_OTHER_CHARACTER;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << ID << Direction << x << y << hp;
+}
+void SetPacket_DeleteCharacter(CPacket* clpPacket, DWORD ID)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_DELETE_CHARACTER;
+	header.byType = dfPACKET_SC_DELETE_CHARACTER;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << ID;
+}
+void SetPacket_SC_MoveStart(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_MOVE_START;
+	header.byType = dfPACKET_SC_MOVE_START;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << ID << Direction << x << y;
+}
+void SetPacket_SC_MoveStop(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_MOVE_STOP;
+	header.byType = dfPACKET_SC_MOVE_STOP;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << ID << Direction << x << y;
+}
+void SetPacket_SC_ATTACK1(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_ATTACK1;
+	header.byType = dfPACKET_SC_ATTACK1;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << ID << Direction << x << y;
+}
+void SetPacket_SC_ATTACK2(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_ATTACK2;
+	header.byType = dfPACKET_SC_ATTACK2;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << ID << Direction << x << y;
+}
+void SetPacket_SC_ATTACK3(CPacket* clpPacket, DWORD ID, BYTE Direction, WORD x, WORD y)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_ATTACK3;
+	header.byType = dfPACKET_SC_ATTACK3;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << ID << Direction << x << y;
+}
+void SetPacket_SC_DAMAGE(CPacket* clpPacket, DWORD AttackID, DWORD DamageID, BYTE DamageHP)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_DAMAGE;
+	header.byType = dfPACKET_SC_DAMAGE;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << AttackID << DamageID << DamageHP;
+}
+void SetPacket_SC_Echo(CPacket* clpPacket, DWORD time)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_ECHO;
+	header.byType = dfPACKET_SC_ECHO;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << time;
+}
+void SetPacket_SC_Sync(CPacket* clpPacket, DWORD ID, WORD x, WORD y)
+{
+	clpPacket->Clear();
+	stPACKET_HEADER header;
+	header.byCode = dfPACKET_CODE;
+	header.bySize = szPACKET_SC_SYNC;
+	header.byType = dfPACKET_SC_SYNC;
+	clpPacket->PutData((char*)&header, sizeof(header));
+	*clpPacket << ID << x << y;
+}
+
+//ì„¹í„° ì²˜ë¦¬
+//ìºë¦­í„°ì˜ í˜„ì¬ ì¢Œí‘œë¡œ ì„¹í„°ìœ„ì¹˜ë¥¼ ê³„ì‚°í•˜ì—¬ í•´ë‹¹ ì„¹í„°ì— ë„£ìŒ
+void Sector_AddUser(USER* pUser)
+{
+	g_Sector[pUser->curSector.iY][pUser->curSector.iX].push_back(pUser);
+}
+//ìºë¦­í„°ì˜ oldSectorì—ì„œ ì‚­ì œ
+void Sector_RemoveUser(USER* pUser)
+{
+	g_Sector[pUser->oldSector.iY][pUser->oldSector.iX].remove(pUser);
+}
+//í˜„ì¬ ìœ„ì¹˜í•œ ì„¹í„°ì—ì„œ ì‚­ì œí•œ í›„, í˜„ì¬ì˜ ì¢Œí‘œë¡œ ì„¹í„°ë¥¼ ìƒˆë¡­ê²Œ ê³„ì‚°í•˜ì—¬ ë„£ìŒ
+bool Sector_UpdateUser(USER* pUser)
+{
+	int newSectorX = pUser->x / sectorXSize;
+	int newSectorY = pUser->y / sectorYSize;
+	if (newSectorX == pUser->curSector.iX && newSectorY == pUser->curSector.iY)
+	{
+		return false;
+	}
+	if (newSectorX >= dfSECTOR_MAX_X || newSectorY >= dfSECTOR_MAX_Y)
+	{
+		return false;
+	}
+	//1. CurSector -> OldSector ì €ì¥
+	pUser->oldSector = pUser->curSector;
+	//2. CurSector ì„¹í„°ì—ì„œ ìºë¦­í„° ì‚­ì œ RemoveUser
+	Sector_RemoveUser(pUser);
+	//3. ì‹ ê·œ ì„¹í„° ê³„ì‚° > CurSector ì €ì¥
+	pUser->curSector.iX = newSectorX;
+	pUser->curSector.iY = newSectorY;
+	//4. CurSector ìœ„ì¹˜ì— ìºë¦­í„° ì¶”ê°€ AddCharacter
+	Sector_AddUser(pUser);
+	return true;
+}
+//íŠ¹ì • ì„¹í„° ì¢Œí‘œ ê¸°ì¤€ ì£¼ë³€ ì˜í–¥ê¶Œ ì„¹í„° ì–»ê¸°
+void GetSectorAround(int sectorX, int sectorY, st_SECTOR_AROUND* pSectorAround)
+{
+	int idx = 0;
+	for (int yAdder = -1; yAdder <= 1; yAdder++)
+	{
+		if (sectorY + yAdder <0 || sectorY + yAdder >= dfSECTOR_MAX_Y)
+			continue;
+		for (int xAdder = -1; xAdder <= 1; xAdder++)
+		{
+			if (sectorX + xAdder <0 || sectorX + xAdder >= dfSECTOR_MAX_X)
+				continue;
+			pSectorAround->Around[idx].iX = sectorX + xAdder;
+			pSectorAround->Around[idx].iY = sectorY + yAdder;
+			idx++;
+		}
+	}
+	pSectorAround->iCount = idx;
+}
+//ì„¹í„°ì—ì„œ ì„¹í„°ë¥¼ ì´ë™í•  ë•Œ ì„¹í„° ì˜í–¥ê¶Œì—ì„œ ë¹ ì§„ ì„¹í„°, ìƒˆë¡œ ì¶”ê°€ëœ ì„¹í„°ì˜ ì •ë³´ë¥¼ êµ¬í•˜ëŠ” í•¨ìˆ˜
+void GetUpdateSectorAround(USER* pUser, st_SECTOR_AROUND* pRemoveSector, st_SECTOR_AROUND* pAddSector)
+{
+	st_SECTOR_AROUND oldSectorAround;
+	st_SECTOR_AROUND curSectorAround;
+	GetSectorAround(pUser->oldSector.iX, pUser->oldSector.iY, &oldSectorAround);
+	GetSectorAround(pUser->curSector.iX, pUser->curSector.iY, &curSectorAround);
+	pRemoveSector->iCount = 0;
+	pAddSector->iCount = 0;
+	//ì´ì „ ì„¹í„° ì •ë³´ ì¤‘, ì‹ ê·œ ì„¹í„°ì—ëŠ” ì—†ëŠ” ì •ë³´ë¥¼ ì°¾ì•„ì„œ RemoveSectorì— ë„£ìŒ.
+	for (int i = 0; i < oldSectorAround.iCount; i++)
+	{
+		bool isFind = false;
+		for (int j = 0; j < curSectorAround.iCount; j++)
+		{
+			if (oldSectorAround.Around[i].iX == curSectorAround.Around[j].iX &&
+				oldSectorAround.Around[i].iY == curSectorAround.Around[j].iY)
+			{
+				isFind = true;
+				break;
+			}
+		}
+		if (isFind == false)
+		{
+			pRemoveSector->Around[pRemoveSector->iCount++] = oldSectorAround.Around[i];
+		}
+	}
+	//í˜„ì¬ ì„¹í„° ì •ë³´ ì¤‘, ì´ì „ ì„¹í„°ì—ëŠ” ì—†ëŠ” ì •ë³´ë¥¼ ì°¾ì•„ì„œ AddSectorì— ë„£ìŒ.
+	for (int i = 0; i < curSectorAround.iCount; i++)
+	{
+		bool isFind = false;
+		for (int j = 0; j < oldSectorAround.iCount; j++)
+		{
+			if (curSectorAround.Around[i].iX == oldSectorAround.Around[j].iX &&
+				curSectorAround.Around[i].iY == oldSectorAround.Around[j].iY)
+			{
+				isFind = true;
+				break;
+			}
+		}
+		if (isFind == false)
+		{
+			pAddSector->Around[pAddSector->iCount++] = curSectorAround.Around[i];
+		}
+	}
+}
+void UserSectorUpdatePacket(USER* pUser)
+{
+	st_SECTOR_AROUND removeSector;
+	st_SECTOR_AROUND addSector;
+	GetUpdateSectorAround(pUser, &removeSector, &addSector);
+	std::list<USER*>* pUserList;
+	USER* curUser;
+	CPacket packet;
+	//1. ì´ì „ ì„¹í„°ì—ì„œ ì—†ì–´ì§„ ë¶€ë¶„ì— ~ ìºë¦­í„° ì‚­ì œ ë©”ì‹œì§€
+	SetPacket_DeleteCharacter(&packet, pUser->userID);
+	for (int i = 0; i < removeSector.iCount; i++)
+	{
+		SendPacket_SectorOne(removeSector.Around[i].iX, removeSector.Around[i].iY, &packet, NULL);
+	}
+	//2. ì´ë™í•˜ëŠ” ìºë¦­í„°ì—ê²Œ ì´ì „ ì„¹í„°ì—ì„œ ì œì™¸ëœ ì„¹í„°ì˜ ìºë¦­í„°ë“¤ ì‚­ì œ ì‹œí‚¤ëŠ” ë©”ì‹œì§€
+	for (int i = 0; i < removeSector.iCount; i++)
+	{
+		pUserList = &g_Sector[removeSector.Around[i].iY][removeSector.Around[i].iX];
+		for (std::list<USER*>::iterator iter = pUserList->begin(); iter != pUserList->end(); iter++)
+		{
+			SetPacket_DeleteCharacter(&packet, (*iter)->userID);
+			SendUnicast(pUser->pSession, &packet);
+		}
+	}
+	//3. ìƒˆë¡œ ì¶”ê°€ëœ ì„¹í„°ì— - ìºë¦­í„° ìƒì„± ë©”ì‹œì§€ & ì´ë™ ë©”ì‹œì§€
+	SetPacket_CreateOtherCharacter(&packet, pUser->userID, pUser->Direction, pUser->x, pUser->y, pUser->hp);
+	for (int i = 0; i < addSector.iCount; i++)
+	{
+		SendPacket_SectorOne(addSector.Around[i].iX, addSector.Around[i].iY, &packet, NULL);
+	}
+	SetPacket_SC_MoveStart(&packet, pUser->userID, pUser->Direction, pUser->x, pUser->y);
+	for (int i = 0; i < addSector.iCount; i++)
+	{
+		SendPacket_SectorOne(addSector.Around[i].iX, addSector.Around[i].iY, &packet, NULL);
+	}
+
+	//4. ì´ë™í•˜ëŠ” ìºë¦­í„°ì—ê²Œ - ìƒˆë¡œ ì§„ì…í•œ ì„¹í„°ì˜ ìºë¦­í„°ë“¤ ìƒì„± ë©”ì‹œì§€
+	for (int i = 0; i < addSector.iCount; i++)
+	{
+		pUserList = &g_Sector[addSector.Around[i].iY][addSector.Around[i].iX];
+		for (std::list<USER*>::iterator iter = pUserList->begin(); iter != pUserList->end(); iter++)
+		{
+			curUser = *iter;
+			//ë³¸ì¸ì€ ì œì™¸
+			if (curUser == pUser)
+				continue;
+			SetPacket_CreateOtherCharacter(&packet, curUser->userID, curUser->Direction, curUser->x, curUser->y, curUser->hp);
+			SendUnicast(pUser->pSession, &packet);
+			//í•´ë‹¹ ìºë¦­í„°ê°€ ì´ë™ ì¤‘ì´ë¼ë©´
+			if (curUser->isMove == TRUE)
+			{
+				SetPacket_SC_MoveStart(&packet, curUser->userID, curUser->Direction, curUser->x, curUser->y);
+				SendUnicast(pUser->pSession, &packet);
+			}
+		}
+	}
 }
