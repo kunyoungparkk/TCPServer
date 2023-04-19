@@ -53,8 +53,8 @@
 #define dfATTACK3_DAMAGE		3
 
 //섹터 범위
-#define	dfSECTOR_MAX_X 50
-#define	dfSECTOR_MAX_Y 50
+#define	dfSECTOR_MAX_X 40
+#define	dfSECTOR_MAX_Y 40
 
 int		g_iLogLevel = 1;
 WCHAR	g_szLogBuff[1024];
@@ -110,7 +110,7 @@ struct USER
 	char	hp;
 };
 //세션 관리
-std::map<int, Session*> sessionMap;
+std::map<SOCKET, Session*> sessionMap;
 std::list<Session*> disconnectSessions;
 //캐릭터 관리
 std::map<int, USER*> userMap;
@@ -129,17 +129,8 @@ int	sendRetVal;
 int enqueueRetVal;
 int dequeueRetVal;
 
-int FPSCount = 0;
 int recvCount = 0;
 int sendCount = 0;
-BOOL IsValidPosition(WORD prevX, WORD prevY, WORD nextX, WORD nextY)
-{
-	if (abs(prevX - nextX) > dfERROR_RANGE || abs(prevY - nextY) > dfERROR_RANGE)
-	{
-		return FALSE;
-	}
-	else return TRUE;
-}
 
 //네트워크
 void Disconnect(Session* session)
@@ -148,22 +139,21 @@ void Disconnect(Session* session)
 }
 Session* FindSession(SOCKET sock)
 {
-	for (auto iter = sessionMap.begin(); iter != sessionMap.end(); iter++)
+	auto iter = sessionMap.find(sock);
+	if (iter == sessionMap.end())
 	{
-		if (iter->second->sock == sock)
-		{
-			return iter->second;
-		}
+		_LOG(dfLOG_LEVEL_ERROR, L"!!FindSession Failed. Session SOCKET: %d", sock);
+		exit(1);
 	}
-	return NULL;
+	return iter->second;
 }
-void InsertSession(int sessionID, Session* session)
+void InsertSession(SOCKET sessionSock, Session* session)
 {
-	sessionMap.insert({ sessionID, session });
+	sessionMap.insert({ sessionSock, session });
 }
-void DeleteSession(int sessionID)
+void DeleteSession(SOCKET sessionSock)
 {
-	sessionMap.erase(sessionID);
+	sessionMap.erase(sessionSock);
 }
 void SendUnicast(Session* session, CPacket* clpPacket);
 //void SendBroadcast(Session* exceptSession, CPacket* clpPacket);
@@ -230,10 +220,14 @@ int wmain(int argc, WCHAR* argv[])
 {
 	timeBeginPeriod(1);
 	//1초마다 타이머
-	DWORD statusTimer = timeGetTime();
+	DWORD prevTime = timeGetTime();
 	//프레임 시간 맞춰주는(20ms) 용도의 변수
 	DWORD startTime = timeGetTime();
 	DWORD currentTime;
+	DWORD timeInterval;
+
+	int FPSCount = 0;
+	int networkCount = 0;
 
 	//윈속 초기화
 	WSADATA wsa;
@@ -272,12 +266,13 @@ int wmain(int argc, WCHAR* argv[])
 	{
 		//네트워크 IO
 		NetworkProc(listen_sock);
-
+		networkCount++;
 		//로직 - 50프레임 맞추기
 		currentTime = timeGetTime();
-		if (currentTime - startTime >= 1000 / FPS)
+		timeInterval = currentTime - startTime;
+		if (timeInterval >= 1000 / FPS)
 		{
-			startTime = currentTime;
+			startTime = currentTime - (timeInterval - 1000/FPS);
 			//로직 (이동)
 			for (std::map<int, USER*>::iterator iter = userMap.begin(); iter != userMap.end(); iter++)
 			{
@@ -286,16 +281,22 @@ int wmain(int argc, WCHAR* argv[])
 			FPSCount++;
 		}
 		//1초마다 현재 상태 PRINT, 일정시간 이상 응답없는 클라이언트 끊기
-		if (currentTime - statusTimer >= 1000)
+		if (currentTime - prevTime >= 1000)
 		{
-			statusTimer = currentTime;
-			_LOG(dfLOG_LEVEL_SYSTEM, L"[STATUS] FPS: %d / userCount: %d / RTPS: %d / STPS: %d", FPSCount, sessionMap.size(), recvCount, sendCount);
+			prevTime = currentTime;
+			//임시
+			if (FPSCount < 20)
+			{
+				exit(1);
+			}
+			_LOG(dfLOG_LEVEL_SYSTEM, L"[STATUS] FPS: %d / userCount: %d / netIOCount:%d / RTPS: %d / STPS: %d", FPSCount, sessionMap.size(), networkCount, recvCount, sendCount);
 			FPSCount = 0;
+			networkCount = 0;
 			recvCount = 0;
 			sendCount = 0;
 			Session* curSession;
 			//일정시간 이상 응답없는 클라이언트 끊기
-			for (std::map<int, Session*>::iterator iter = sessionMap.begin(); iter != sessionMap.end(); iter++)
+			for (std::map<SOCKET, Session*>::iterator iter = sessionMap.begin(); iter != sessionMap.end(); iter++)
 			{
 				curSession = iter->second;
 				if (currentTime - curSession->dwLastRecvTime > dfNETWORK_PACKET_RECV_TIMEOUT)
@@ -373,7 +374,7 @@ void NetworkProc(SOCKET listen_sock)
 		DeleteUser(user->userID);
 		free(user);
 		//세션 맵에서 제거
-		DeleteSession((*iter)->dwSessionID);
+		DeleteSession((*iter)->sock);
 		closesocket((*iter)->sock);
 		delete((*iter)->recvQueue);
 		delete((*iter)->sendQueue);
@@ -554,7 +555,7 @@ void AcceptProc(SOCKET listen_sock)
 	//관리되는 맵/리스트에 추가
 	Sector_AddUser(user);
 	InsertUser(user->userID, user);
-	InsertSession(session->dwSessionID, session);
+	InsertSession(session->sock, session);
 	//신규 유저에게: 1) 신규 유저 할당(생성)
 	CPacket cPacket;
 	SetPacket_CreateMyCharacter(&cPacket, user->userID, user->Direction, user->x, user->y, user->hp);
@@ -712,7 +713,15 @@ void SendProc(SOCKET socket)
 			}
 			else
 			{
-				_LOG(dfLOG_LEVEL_ERROR, L"!!SEND SOCKETERROR!, ERROR CODE: %d, Session: %d", WSAGetLastError(), session->dwSessionID);
+				int errorCode = WSAGetLastError();
+				if (errorCode == 10054)
+				{
+					_LOG(dfLOG_LEVEL_DEBUG, L"!!SEND SOCKETERROR!, Client is already disconnected > Disconnect");
+				}
+				else
+				{
+					_LOG(dfLOG_LEVEL_ERROR, L"!!SEND SOCKETERROR!, ERROR CODE: %d, Session: %d", errorCode, session->dwSessionID);
+				}
 				Disconnect(session);
 				return;
 			}
@@ -911,7 +920,7 @@ void RecvPacketProc_MoveStart(Session* session, CPacket* clpPacket)
 	user->isMove = TRUE;
 	*clpPacket >> user->Direction >> newX >> newY;
 	//좌표 유효성 체크
-	if (FALSE == IsValidPosition(user->x, user->y, newX, newY))
+	if (abs(user->x - newX) > dfERROR_RANGE || abs(user->y - newY) > dfERROR_RANGE)
 	{
 		//싱크 맞추기
 		SetPacket_SC_Sync(clpPacket, user->userID, user->x, user->y);
@@ -943,7 +952,7 @@ void RecvPacketProc_MoveStop(Session* session, CPacket* clpPacket)
 	user->isMove = FALSE;
 	*clpPacket >> user->Direction >> newX >> newY;
 	//좌표 유효성 체크
-	if (FALSE == IsValidPosition(user->x, user->y, newX, newY))
+	if (abs(user->x - newX) > dfERROR_RANGE || abs(user->y - newY) > dfERROR_RANGE)
 	{
 		//싱크 맞추기
 		SetPacket_SC_Sync(clpPacket, user->userID, user->x, user->y);
@@ -974,7 +983,7 @@ void RecvPacketProc_Attack1(Session* session, CPacket* clpPacket)
 	//isMove TRUE, direction, 좌표
 	*clpPacket >> user->Direction >> newX >> newY;
 	//좌표 유효성 체크
-	if (FALSE == IsValidPosition(user->x, user->y, newX, newY))
+	if (abs(user->x - newX) > dfERROR_RANGE || abs(user->y - newY) > dfERROR_RANGE)
 	{
 		//싱크 맞추기
 		SetPacket_SC_Sync(clpPacket, user->userID, user->x, user->y);
@@ -1007,7 +1016,7 @@ void RecvPacketProc_Attack2(Session* session, CPacket* clpPacket)
 	//isMove TRUE, direction, 좌표
 	*clpPacket >> user->Direction >> newX >> newY;
 	//좌표 유효성 체크
-	if (FALSE == IsValidPosition(user->x, user->y, newX, newY))
+	if (abs(user->x - newX) > dfERROR_RANGE || abs(user->y - newY) > dfERROR_RANGE)
 	{
 		//싱크 맞추기
 		SetPacket_SC_Sync(clpPacket, user->userID, user->x, user->y);
@@ -1040,7 +1049,7 @@ void RecvPacketProc_Attack3(Session* session, CPacket* clpPacket)
 	//isMove TRUE, direction, 좌표
 	*clpPacket >> user->Direction >> newX >> newY;
 	//좌표 유효성 체크
-	if (FALSE == IsValidPosition(user->x, user->y, newX, newY))
+	if (abs(user->x - newX) > dfERROR_RANGE || abs(user->y - newY) > dfERROR_RANGE)
 	{
 		//싱크 맞추기
 		SetPacket_SC_Sync(clpPacket, user->userID, user->x, user->y);
